@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AIPAZIENTI - TROVA FILE DICOM E INVIA</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 0; padding: 16px; background:#0b0f14; color:#e7eef7; }
+    .app { max-width: 1100px; margin: 0 auto; }
+    h1 { margin:0 0 10px; font-size:20px; }
+    .sub { opacity:.85; margin-bottom:16px; line-height:1.35; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    button,label.btn {
+      background:#1b2838; color:#e7eef7; border:1px solid #2c3f57;
+      padding:10px 12px; border-radius:10px; cursor:pointer; display:inline-block;
+    }
+    button:hover,label.btn:hover { filter:brightness(1.08); }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .card { background:#0f1722; border:1px solid #223246; border-radius:14px; padding:12px; margin-top:12px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    @media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+    .meta{ font-size:12px; opacity:.8; }
+    .pill{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2c3f57; margin-left:6px; font-size:12px; opacity:.9; }
+    .list{ max-height:360px; overflow:auto; border-radius:12px; border:1px solid #223246; background:#0b0f14; }
+    .item{ display:flex; gap:10px; align-items:start; padding:10px; border-bottom:1px solid #162233; }
+    .item:last-child{ border-bottom:0; }
+    .path{ font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; opacity:.95; }
+    .log{
+      width:100%; height:260px; resize:vertical;
+      background:#070a0e; color:#d7e6ff; border:1px solid #223246;
+      border-radius:12px; padding:10px; font-family:ui-monospace, Menlo, Consolas, monospace;
+      font-size:12px; line-height:1.35;
+    }
+    input[type="checkbox"]{ transform: translateY(2px); }
+    progress{ width:100%; height:14px; }
+    .btn-group { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    .btn-wa { background: #25D366; color: #111; border-color: #128C7E; }
+    .btn-gmail { background: #EA4335; color: white; border-color: #B23121; }
+    .btn-success { background: #28a745; color: white; border-color: #1e7e34; }
+  </style>
+</head>
+<body>
+<div class="app">
+  <h1></h1>
+  <div class="sub">
+    <span class="pill">Offline</span>
+  </div>
+
+  <div class="row">
+    <label class="btn">
+      Seleziona cartella CD
+      <input id="dir" type="file" webkitdirectory directory multiple style="display:none">
+    </label>
+    <button id="scan" disabled>Cerca</button>
+    <button id="zip" disabled>Scarica ZIP selezionati</button>
+    <button id="all" disabled>Seleziona tutti</button>
+    <button id="none" disabled>Deseleziona tutti</button>
+  </div>
+  
+  <div class="btn-group">
+    <button id="whatsappBtn" class="btn-wa" disabled>Invia via WhatsApp (con allegato)</button>
+    <button id="gmailBtn" class="btn-gmail" disabled>Invia via Gmail (con allegato)</button>
+    <button id="downloadBtn" class="btn-success" disabled>Scarica ZIP prima</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <b>Risultati</b>
+      <div class="meta" id="summary">Nessuna scansione eseguita.</div>
+      <div style="margin-top:8px">
+        <progress id="prog" value="0" max="1"></progress>
+        <div class="meta" id="progTxt">0%</div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="list" id="results"></div>
+    </div>
+
+    <div class="card">
+      <b>Log</b>
+      <div class="meta"></div>
+      <div style="height:10px"></div>
+      <textarea id="log" class="log" readonly></textarea>
+    </div>
+  </div>
+</div>
+
+<script>
+const elDir = document.getElementById('dir');
+const elScan = document.getElementById('scan');
+const elZip = document.getElementById('zip');
+const elAll = document.getElementById('all');
+const elNone = document.getElementById('none');
+const elResults = document.getElementById('results');
+const elLog = document.getElementById('log');
+const elSummary = document.getElementById('summary');
+const elProg = document.getElementById('prog');
+const elProgTxt = document.getElementById('progTxt');
+
+const elWhatsApp = document.getElementById('whatsappBtn');
+const elGmail = document.getElementById('gmailBtn');
+const elDownloadBtn = document.getElementById('downloadBtn');
+
+let pickedFiles = [];
+let found = [];
+let lastZipBlob = null;
+let lastZipName = '';
+
+function logLine(msg){
+  const stamp = new Date().toISOString().replace('T',' ').replace('Z','');
+  elLog.value += `[${stamp}] ${msg}\n`;
+  elLog.scrollTop = elLog.scrollHeight;
+}
+function setProgress(v01){
+  elProg.max = 1;
+  elProg.value = Math.max(0, Math.min(1, v01));
+  elProgTxt.textContent = `${Math.round(elProg.value*100)}%`;
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function baseName(p){ const a = (p||'').split('/'); return a[a.length-1] || ''; }
+
+function updateSummary(extra=''){
+  const nD = found.filter(x=>x.kind==='DICOM').length;
+  const nP = found.filter(x=>x.kind==='PDF').length;
+  elSummary.innerHTML = `Trovati: <b>${found.length}</b> (DICOM: <b>${nD}</b>, PDF<3: <b>${nP}</b>) ${extra ? `<span class="pill">${escapeHtml(extra)}</span>` : ''}`;
+}
+function updateButtons(){
+  const anySel = found.some(x=>x.selected);
+  elZip.disabled = !anySel;
+  elAll.disabled = found.length === 0;
+  elNone.disabled = found.length === 0;
+
+  const hasZip = lastZipBlob !== null;
+  elWhatsApp.disabled = !hasZip;
+  elGmail.disabled = !hasZip;
+  elDownloadBtn.disabled = !hasZip;
+}
+
+async function isPdfByHeader(file){
+  if (file.size < 4) return false;
+  const buf = await file.slice(0, 8).arrayBuffer();
+  const u8 = new Uint8Array(buf);
+  const sig = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+  return sig === '%PDF';
+}
+async function getPdfPageCountApprox(file){
+  const maxRead = Math.min(file.size, 12 * 1024 * 1024);
+  const buf = await file.slice(0, maxRead).arrayBuffer();
+  const text = new TextDecoder('latin1').decode(new Uint8Array(buf));
+  const re = /\/Type\s*\/Page(?!s)/g;
+  const m = text.match(re);
+  return m ? m.length : 0;
+}
+
+const VR_SET = new Set([
+  'AE','AS','AT','CS','DA','DS','DT','FL','FD','IS','LO','LT','OB','OD','OF','OL','OW',
+  'PN','SH','SL','SQ','SS','ST','SV','TM','UC','UI','UL','UN','UR','US','UT','UV'
+]);
+function readU16LE(u8, o){ return u8[o] | (u8[o+1] << 8); }
+function readU32LE(u8, o){ return (u8[o]) | (u8[o+1]<<8) | (u8[o+2]<<16) | (u8[o+3]<<24) >>> 0; }
+function findBytes(hay, needle){
+  outer: for (let i=0; i<=hay.length-needle.length; i++){
+    for (let j=0; j<needle.length; j++){
+      if (hay[i+j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+function looksLikeUIDAscii(bytes){
+  let best = '', cur = '';
+  for (let i=0; i<bytes.length; i++){
+    const c = bytes[i];
+    const ch = (c>=32 && c<=126) ? String.fromCharCode(c) : '';
+    if (ch && ((ch >= '0' && ch <= '9') || ch === '.')) cur += ch;
+    else { if (cur.length >= 8 && cur.includes('.')) best = cur; cur = ''; }
+    if (cur.length > 96) cur = cur.slice(0,96);
+  }
+  if (cur.length >= 8 && cur.includes('.')) best = cur;
+  if (!best) return false;
+  if (best.startsWith('.') || best.endsWith('.')) return false;
+  if (best.includes('..')) return false;
+  return true;
+}
+function validateDicomByTagScan(u8, start){
+  let uidHits = 0;
+  let pixelHit = false;
+
+  const TAGS_UID = [
+    [0x08,0x00,0x16,0x00],
+    [0x08,0x00,0x18,0x00],
+    [0x20,0x00,0x0D,0x00],
+    [0x20,0x00,0x0E,0x00],
+    [0x20,0x00,0x52,0x00],
+  ];
+  const TAG_PIXEL = [0xE0,0x7F,0x10,0x00];
+
+  let o = start;
+  let steps = 0;
+  while (o + 8 <= u8.length && steps < 5000) {
+    steps++;
+    const group = readU16LE(u8, o);
+    const elem  = readU16LE(u8, o+2);
+    const vr = String.fromCharCode(u8[o+4], u8[o+5]);
+    if (!VR_SET.has(vr)) break;
+
+    let len = 0, valueOffset = 0;
+    if (['OB','OD','OF','OL','OW','SQ','UC','UR','UT','UN'].includes(vr)) {
+      if (o + 12 > u8.length) break;
+      len = readU32LE(u8, o+8);
+      valueOffset = o + 12;
+      o = valueOffset + len;
+    } else {
+      len = readU16LE(u8, o+6);
+      valueOffset = o + 8;
+      o = valueOffset + len;
+    }
+    if (valueOffset + 1 > u8.length) break;
+
+    if (vr === 'UI') {
+      const slice = u8.slice(valueOffset, Math.min(u8.length, valueOffset + Math.min(len, 128)));
+      if (looksLikeUIDAscii(slice)) uidHits++;
+    }
+    if (group === 0x7FE0 && elem === 0x0010) pixelHit = true;
+
+    if (uidHits >= 2) return true;
+    if (uidHits >= 1 && pixelHit) return true;
+
+    if (o <= start || o > u8.length) break;
+  }
+
+  for (const t of TAGS_UID) {
+    const idx = findBytes(u8, t);
+    if (idx !== -1) {
+      const near = u8.slice(Math.min(u8.length, idx + 4), Math.min(u8.length, idx + 4 + 200));
+      if (looksLikeUIDAscii(near)) uidHits++;
+    }
+  }
+  if (findBytes(u8, TAG_PIXEL) !== -1) pixelHit = true;
+
+  if (uidHits >= 2) return true;
+  if (uidHits >= 1 && pixelHit) return true;
+  return false;
+}
+async function isDicomStrong(file, relPath){
+  const b = baseName(relPath).toLowerCase();
+  if (b === 'dicomdir') return false;
+  if (file.size < 256) return false;
+
+  const headLen = Math.min(file.size, 1024 * 1024);
+  const buf = await file.slice(0, headLen).arrayBuffer();
+  const u8 = new Uint8Array(buf);
+
+  let start = 0;
+  if (u8.length >= 132) {
+    const sig = String.fromCharCode(u8[128],u8[129],u8[130],u8[131]);
+    if (sig === 'DICM') start = 132;
+  }
+  return validateDicomByTagScan(u8, start);
+}
+
+function crc32(buf) {
+  let c = ~0;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & (-(c & 1)));
+  }
+  return ~c >>> 0;
+}
+function u16(n){ return new Uint8Array([n & 255, (n>>>8)&255]); }
+function u32(n){ return new Uint8Array([n & 255, (n>>>8)&255, (n>>>16)&255, (n>>>24)&255]); }
+function concat(parts){
+  const total = parts.reduce((s,p)=>s+p.length,0);
+  const out = new Uint8Array(total);
+  let o=0;
+  for (const p of parts){ out.set(p,o); o += p.length; }
+  return out;
+}
+function toDosTimeDate(d){
+  const year = Math.max(1980, d.getFullYear());
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  const hours = d.getHours();
+  const mins = d.getMinutes();
+  const secs = Math.floor(d.getSeconds() / 2);
+  const dosTime = (hours << 11) | (mins << 5) | secs;
+  const dosDate = ((year - 1980) << 9) | (month << 5) | day;
+  return { dosTime, dosDate };
+}
+function normZipPath(p){ return (p || '').replace(/\\/g,'/').replace(/^\/+/, ''); }
+async function makeZipStore(entries){
+  const now = new Date();
+  const {dosTime, dosDate} = toDosTimeDate(now);
+
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  const FLAG_UTF8 = 0x0800;
+  const VERSION = 20;
+
+  for (const e of entries){
+    const name = normZipPath(e.name);
+    const nameBytes = new TextEncoder().encode(name);
+    const data = e.data;
+    const crc = crc32(data);
+
+    const localHeader = concat([
+      u32(0x04034b50),
+      u16(VERSION),
+      u16(FLAG_UTF8),
+      u16(0),
+      u16(dosTime),
+      u16(dosDate),
+      u32(crc),
+      u32(data.length),
+      u32(data.length),
+      u16(nameBytes.length),
+      u16(0),
+      nameBytes
+    ]);
+
+    localParts.push(localHeader, data);
+
+    const centralHeader = concat([
+      u32(0x02014b50),
+      u16(VERSION),
+      u16(VERSION),
+      u16(FLAG_UTF8),
+      u16(0),
+      u16(dosTime),
+      u16(dosDate),
+      u32(crc),
+      u32(data.length),
+      u32(data.length),
+      u16(nameBytes.length),
+      u16(0),
+      u16(0),
+      u16(0),
+      u16(0),
+      u32(0),
+      u32(offset),
+      nameBytes
+    ]);
+
+    centralParts.push(centralHeader);
+    offset += localHeader.length + data.length;
+  }
+
+  const centralData = concat(centralParts);
+  const eocd = concat([
+    u32(0x06054b50),
+    u16(0), u16(0),
+    u16(entries.length),
+    u16(entries.length),
+    u32(centralData.length),
+    u32(offset),
+    u16(0)
+  ]);
+
+  return concat([...localParts, centralData, eocd]);
+}
+
+function renderResults(){
+  elResults.innerHTML = '';
+  if (!found.length){
+    elResults.innerHTML = `<div class="item"><div class="meta">Nessun file trovato.</div></div>`;
+    updateButtons();
+    return;
+  }
+
+  for (const r of found){
+    const row = document.createElement('div');
+    row.className = 'item';
+
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.checked = r.selected;
+    chk.onchange = () => { r.selected = chk.checked; updateButtons(); };
+
+    const info = document.createElement('div');
+    info.style.flex = '1';
+
+    const title = document.createElement('div');
+    title.innerHTML = `<b>${r.kind}</b> <span class="pill">${escapeHtml(r.kind==='PDF' ? `pagine≈${r.pdfPages}` : 'UID/tag OK')}</span>`;
+    const path = document.createElement('div');
+    path.className = 'path';
+    path.textContent = r.path;
+
+    info.appendChild(title);
+    info.appendChild(path);
+
+    row.appendChild(chk);
+    row.appendChild(info);
+    elResults.appendChild(row);
+  }
+  updateButtons();
+}
+
+elDir.addEventListener('change', () => {
+  pickedFiles = Array.from(elDir.files || []);
+  logLine(`File selezionati: ${pickedFiles.length}`);
+  elScan.disabled = pickedFiles.length === 0;
+  found = [];
+  renderResults();
+  updateSummary('pronto');
+});
+
+elScan.addEventListener('click', async () => {
+  found = [];
+  renderResults();
+  updateSummary('scansione in corso');
+  setProgress(0);
+
+  let pdfKept = 0, pdfIgnored = 0, dicomKept = 0, dicomRejected = 0, dicomdirIgnored = 0;
+
+  for (let i=0; i<pickedFiles.length; i++){
+    const f = pickedFiles[i];
+    const rel = f.webkitRelativePath || f.name;
+    const lower = rel.toLowerCase();
+    const b = baseName(rel).toLowerCase();
+
+    if (b === 'dicomdir'){
+      dicomdirIgnored++;
+      setProgress((i+1)/pickedFiles.length);
+      continue;
+    }
+
+    let isPdf = lower.endsWith('.pdf');
+    if (!isPdf && !lower.includes('.') && f.size >= 4) isPdf = await isPdfByHeader(f);
+
+    if (isPdf){
+      let pages = 0;
+      try { pages = await getPdfPageCountApprox(f); } catch { pages = 0; }
+      if (pages > 0 && pages < 3){
+        pdfKept++;
+        logLine(`PDF < 3 pagine: ${rel} (pagine≈${pages})`);
+        found.push({ path: rel, kind:'PDF', pdfPages: pages, file: f, selected:true });
+      } else {
+        pdfIgnored++;
+      }
+      setProgress((i+1)/pickedFiles.length);
+      continue;
+    }
+
+    let isDicom = false;
+    try { isDicom = await isDicomStrong(f, rel); } catch { isDicom = false; }
+
+    if (isDicom){
+      dicomKept++;
+      found.push({ path: rel, kind:'DICOM', file: f, selected:true });
+    } else {
+      dicomRejected++;
+    }
+
+    setProgress((i+1)/pickedFiles.length);
+  }
+
+  renderResults();
+  updateSummary(`DICOM ok=${dicomKept}, scartati=${dicomRejected}, DICOMDIR=${dicomdirIgnored}, PDF<3=${pdfKept}, PDF ignorati=${pdfIgnored}`);
+  logLine(`Scansione completata. Risultati=${found.length}`);
+});
+
+elAll.addEventListener('click', () => { found.forEach(x=>x.selected=true); renderResults(); });
+elNone.addEventListener('click', () => { found.forEach(x=>x.selected=false); renderResults(); });
+
+elDownloadBtn.addEventListener('click', () => {
+  if (lastZipBlob) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(lastZipBlob);
+    a.download = lastZipName || 'export_selezionati.zip';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    logLine('Download avviato nuovamente');
+  }
+});
+
+elZip.addEventListener('click', async () => {
+  const sel = found.filter(x=>x.selected);
+  if (!sel.length){ logLine('Nessun file selezionato per ZIP.'); return; }
+
+  logLine(`Creo ZIP (STORE) con ${sel.length} file...`);
+  setProgress(0);
+
+  const entries = [];
+  for (let i=0; i<sel.length; i++){
+    const it = sel[i];
+    const ab = await it.file.arrayBuffer();
+    entries.push({ name: it.path, data: new Uint8Array(ab) });
+    setProgress((i+1)/sel.length);
+  }
+
+  const zipBytes = await makeZipStore(entries);
+  const blob = new Blob([zipBytes], { type: 'application/zip' });
+
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0,19);
+  lastZipName = `AIPAZIENTI_${timestamp}.zip`;
+  lastZipBlob = blob;
+
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = lastZipName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+
+  logLine(`✅ ZIP pronto: ${lastZipName}`);
+  updateButtons();
+});
+
+elWhatsApp.addEventListener('click', () => {
+  if (!lastZipBlob) {
+    logLine('❌ Genera prima lo ZIP con "Scarica ZIP selezionati"');
+    return;
+  }
+  
+  const now = new Date();
+  const dateStr = now.toLocaleString('it-IT');
+  const message = `Salve, invio il file ${lastZipName} generato il ${dateStr}`;
+
+  const waLink = `https://wa.me/393758143701?text=${encodeURIComponent(message + ' - Allegare il file ZIP scaricato in precedenza')}`;
+  window.open(waLink, '_blank');
+  
+  logLine('📱 Aperto WhatsApp. Ora allegare manualmente il file ZIP appena scaricato: ' + lastZipName);
+});
+
+elGmail.addEventListener('click', () => {
+  if (!lastZipBlob) {
+    logLine('❌ Genera prima lo ZIP con "Scarica ZIP selezionati"');
+    return;
+  }
+  
+  const now = new Date();
+  const dateStr = now.toLocaleString('it-IT');
+  const subject = encodeURIComponent(`File AIPAZIENTI ${dateStr}`);
+  const body = encodeURIComponent(
+    `Buongiorno,\n\n` +
+    `in allegato il file ZIP richiesto: ${lastZipName}\n\n` +
+    `Generato il: ${dateStr}\n\n` +
+    `Cordiali saluti.\n\n` +
+    `-- \n` +
+    `AIPAZIENTI`
+  );
+
+  const gmailLink = `https://mail.google.com/mail/?view=cm&fs=1&to=info@aipazienti.com&su=${subject}&body=${body}`;
+  window.open(gmailLink, '_blank');
+  
+  logLine('📧 Aperto Gmail. Allegare manualmente il file ZIP: ' + lastZipName);
+});
+</script>
+</body>
+</html>
